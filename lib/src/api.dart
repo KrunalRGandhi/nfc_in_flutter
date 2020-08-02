@@ -75,6 +75,77 @@ class NFC {
 
   /// readNDEF starts listening for NDEF formatted tags. Any non-NDEF formatted
   /// tags will be filtered out.
+  static Stream<NDEFMessage> readNDEFDispatch({
+    /// once will stop reading after the first tag has been read.
+    bool once = false,
+
+    /// throwOnUserCancel decides if a [NFCUserCanceledSessionException] error
+    /// should be thrown on iOS when the user clicks Cancel/Done.
+    bool throwOnUserCancel = true,
+
+    /// alertMessage sets the message on the iOS NFC modal.
+    String alertMessage = "",
+
+    /// readerMode specifies which mode the reader should use. By default it
+    /// will use the normal mode, which scans for tags normally without
+    /// support for peer-to-peer operations, such as emulated host cards.
+    ///
+    /// This is ignored on iOS as it only has one reading mode.
+    NFCReaderMode readerMode = const NFCDispatchReaderMode(),
+  }) {
+    if (_tagStream == null) {
+      _createTagStream();
+    }
+    // Create a StreamController to wrap the tag stream. Any errors will be
+    // converted to their matching exception classes. The controller stream will
+    // be closed if the errors are fatal.
+    StreamController<NDEFMessage> controller = StreamController();
+    final stream = once ? _tagStream.take(1) : _tagStream;
+    // Listen for tag reads.
+    final subscription = stream.listen(
+          (message) => controller.add(message),
+      onError: (error) {
+        error = _mapException(error);
+        if (!throwOnUserCancel && error is NFCUserCanceledSessionException) {
+          return;
+        }
+        controller.addError(error);
+        controller.close();
+      },
+      onDone: () {
+        _tagStream = null;
+        return controller.close();
+      },
+      // cancelOnError: false
+      // cancelOnError cannot be used as the stream would cancel BEFORE the error
+      // was sent to the controller stream
+    );
+    controller.onCancel = () {
+      subscription.cancel();
+    };
+
+    try {
+      _startReadingNDEF(
+        once,
+        alertMessage,
+        const NFCDispatchReaderMode(),
+      );
+    } on PlatformException catch (err) {
+      if (err.code == "NFCMultipleReaderModes") {
+        throw NFCMultipleReaderModesException();
+      } else if (err.code == "SystemIsBusyError") {
+        throw NFCSystemIsBusyException(err.message);
+      }
+      throw err;
+    } catch (error) {
+      throw error;
+    }
+
+    return controller.stream;
+  }
+
+  /// readNDEF starts listening for NDEF formatted tags. Any non-NDEF formatted
+  /// tags will be filtered out.
   static Stream<NDEFMessage> readNDEF({
     /// once will stop reading after the first tag has been read.
     bool once = false,
@@ -103,7 +174,7 @@ class NFC {
     final stream = once ? _tagStream.take(1) : _tagStream;
     // Listen for tag reads.
     final subscription = stream.listen(
-      (message) => controller.add(message),
+          (message) => controller.add(message),
       onError: (error) {
         error = _mapException(error);
         if (!throwOnUserCancel && error is NFCUserCanceledSessionException) {
@@ -261,6 +332,8 @@ class NFCNormalReaderMode implements NFCReaderMode {
 /// tags with.
 class NFCDispatchReaderMode implements NFCReaderMode {
   String get name => "dispatch";
+
+  const NFCDispatchReaderMode();
 
   @override
   Map get _options {
